@@ -1,0 +1,373 @@
+---
+title: "NBA_mvp_prediction"
+output: html_document
+---
+
+#################### Data Science and NBA using R #####################
+
+First step is to obtain our data #
+One of the best places to obtain data for analysis is Kaggle. 
+There is also a lot of competitions on there where who ever has the best predictive model can win prizes
+For this mini code-along we will be using a dataset based on NBA MVP votings from Kaggle
+I was heavily inspired by a Reddit Post which was crossposted from the following Medium article
+https://towardsdatascience.com/predicting-2018-19-nbas-most-valuable-player-using-machine-learning-512e577032e3
+Dataset can be found here: https://www.kaggle.com/danchyy/nba-mvp-votings-through-history
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# We load up our libraries to start our analysis (None of these are large and shouldn't take more than a few seconds for each)
+library(tidyverse) 
+library(caret)
+library(ggplot2)
+library(glmnet)
+library(randomForest)
+library(neuralnet)
+library(corrplot)
+
+# Additional function for a heat plot of correlation of variables
+# Source: http://www.sthda.com/english/wiki/correlation-matrix-an-r-function-to-do-all-you-need
+rquery.cormat<-function(x, type=c('lower', 'upper', 'full', 'flatten'), graph=TRUE, graphType=c("correlogram", "heatmap"), col=NULL, ...)
+{
+  # Helper functions
+  #+++++++++++++++++
+  # Compute the matrix of correlation p-values
+  cor.pmat <- function(x, ...) {
+    mat <- as.matrix(x)
+    n <- ncol(mat)
+    p.mat<- matrix(NA, n, n)
+    diag(p.mat) <- 0
+    for (i in 1:(n - 1)) {
+      for (j in (i + 1):n) {
+        tmp <- cor.test(mat[, i], mat[, j], ...)
+        p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+      }
+    }
+    colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+    p.mat
+  }
+  # Get lower triangle of the matrix
+  getLower.tri<-function(mat){
+    upper<-mat
+    upper[upper.tri(mat)]<-""
+    mat<-as.data.frame(upper)
+    mat
+  }
+  # Get upper triangle of the matrix
+  getUpper.tri<-function(mat){
+    lt<-mat
+    lt[lower.tri(mat)]<-""
+    mat<-as.data.frame(lt)
+    mat
+  }
+  # Get flatten matrix
+  flattenCorrMatrix <- function(cormat, pmat) {
+    ut <- upper.tri(cormat)
+    data.frame(
+      row = rownames(cormat)[row(cormat)[ut]],
+      column = rownames(cormat)[col(cormat)[ut]],
+      cor  =(cormat)[ut],
+      p = pmat[ut]
+    )
+  }
+  # Define color
+  if (is.null(col)) {
+    col <- colorRampPalette(
+      c("#67001F", "#B2182B", "#D6604D", "#F4A582",
+        "#FDDBC7", "#FFFFFF", "#D1E5F0", "#92C5DE", 
+        "#4393C3", "#2166AC", "#053061"))(200)
+    col<-rev(col)
+  }
+  
+  # Correlation matrix
+  cormat<-signif(cor(x, use = "complete.obs", ...),2)
+  pmat<-signif(cor.pmat(x, ...),2)
+  # Reorder correlation matrix
+  ord<-corrMatOrder(cormat, order="hclust")
+  cormat<-cormat[ord, ord]
+  pmat<-pmat[ord, ord]
+  # Replace correlation coeff by symbols
+  sym<-symnum(cormat, abbr.colnames=FALSE)
+  # Correlogram
+  if(graph & graphType[1]=="correlogram"){
+    corrplot(cormat, type=ifelse(type[1]=="flatten", "lower", type[1]),
+             tl.col="black", tl.srt=45,col=col,...)
+  }
+  else if(graphType[1]=="heatmap")
+    heatmap(cormat, col=col, symm=TRUE)
+  # Get lower/upper triangle
+  if(type[1]=="lower"){
+    cormat<-getLower.tri(cormat)
+    pmat<-getLower.tri(pmat)
+  }
+  else if(type[1]=="upper"){
+    cormat<-getUpper.tri(cormat)
+    pmat<-getUpper.tri(pmat)
+    sym=t(sym)
+  }
+  else if(type[1]=="flatten"){
+    cormat<-flattenCorrMatrix(cormat, pmat)
+    pmat=NULL
+    sym=NULL
+  }
+  list(r=cormat, p=pmat, sym=sym)
+}
+
+```
+
+
+The first thing we should do before we even analyze is just feel out our data
+Try to make sense of it and really think about what questions we can ask
+Our analysis and prediction can only be as good as the questions we ask
+
+Now that we looked at our data, what else can we do with it?
+Another thing we can do is try to make simple graphs and visualizations to see for patterns or try to improve our understanding
+
+```{r echo = FALSE}
+# We load in our data to get started (Change the pathing to yours)
+nba_data = read.csv("~/Downloads/nba-mvp-votings-through-history/mvp_votings.csv", header = TRUE)
+# Now let's look at it
+nba_data %>% View()
+# What are the generaly characteristics of players with the most award_share
+nba_data %>% arrange(desc(award_share)) %>% View()
+```
+
+#################### Visualizations ####################
+For me I'm really curious about some of the distributions of the players specifically on the players with specific stats (pts_per_g, ws, etc)
+Also it's super duper cool to note that you can see the distribution count on Kaggle itself
+
+Way to many players so we have to only look at the ones that the media at least considers MVP worthy
+
+```{r echo=FALSE}
+nba_data_award_share_over25 = nba_data %>% filter(award_share > 0.25)
+ggplot(data = nba_data_award_share_over25, mapping = aes(x = nba_data_award_share_over25$pts_per_g, y = nba_data_award_share_over25$award_share)) +
+  geom_point() + geom_text(aes(label=player),hjust=0, vjust=0) +
+  xlab("pts_per_g") +
+  ylab("award_share") +
+  ggtitle("pts_per_g on award_share")
+
+ggplot(data = nba_data_award_share_over25, mapping = aes(x = nba_data_award_share_over25$ws, y = nba_data_award_share_over25$award_share)) +
+  geom_point() + geom_text(aes(label=player),hjust=0, vjust=0) +
+  xlab("ws") +
+  ylab("award_share") +
+  ggtitle("ws on award_share")
+
+ggplot(data = nba_data_award_share_over25, mapping = aes(x = nba_data_award_share_over25$ast_per_g, y = nba_data_award_share_over25$award_share)) +
+  geom_point() + geom_text(aes(label=player),hjust=0, vjust=0) +
+  xlab("ast_per_g") +
+  ylab("award_share") +
+  ggtitle("ast_per_g on award_share")
+
+ggplot(data = nba_data_award_share_over25, mapping = aes(x = nba_data_award_share_over25$blk_per_g, y = nba_data_award_share_over25$award_share)) +
+  geom_point() + geom_text(aes(label=player),hjust=0, vjust=0) +
+  xlab("blk_per_g") +
+  ylab("award_share") +
+  ggtitle("blk_per_g on award_share")
+
+ggplot(data = nba_data_award_share_over25, mapping = aes(x = nba_data_award_share_over25$trb_per_g, y = nba_data_award_share_over25$award_share)) +
+  geom_point() + geom_text(aes(label=player),hjust=0, vjust=0) +
+  xlab("trb_per_g") +
+  ylab("award_share") +
+  ggtitle("trb_per_g on award_share")
+
+```
+
+Okay now that we have a feel with our data 
+We usually want to clean up our data, however in this case our data is fairly fine for this analysis and was already cleaned by the creator with data scraping
+
+<br> <br>
+
+################## Regression and Classification ################## 
+We generally have 2 types of problems in analysis: Regression vs Classification
+
+We can ask the question based on this data set either
+Who is x player going to win the MVP (Classification: Where we can set a variable that is 1 if they are the winner and 0 otherwise)
+How many MVP votings is such player going to get? (Regression: We are trying to predict a numerical value based on the player's stats and data)
+
+Here let's interpret this as a Regression problem. We are interested in a variable called award_share
+Again either approach is based on what questions we want to ask
+
+The simplest model we can use is a Linear Regression and is a good starting point in our analysis
+```{r echo = FALSE}
+(lm(award_share ~ .-(season + player + points_won + votes_first), data = nba.data)) %>% summary()
+```
+
+#################### Feature Selection ####################
+But what variables or "Features" actually affect MVP voting? 
+Some features will affect the result more than others
+It's not a wise idea to use all possible variables as some of the variables that do not affect the variable that we are trying to predict
+Will bring unwanted noise and variance to our model and this is not what we want
+We want to do "Feature Selection" to try and discover which features actually matter and take the ones that do
+
+We actually did basic feature selection earlier by thinking about "What are the main things that separate an MVP player"
+Usually this means good win share and points
+
+However we can do some basic feature selection
+Linear regression cans use a p-value which is a good indicator of how significant a variable is on the target variable
+We can see stars which indicate the correlation, more stars features are more related
+The smaller the p-value the more important it is (usually)
+
+However, let's see if we can do better
+We can try mutual information (discrete values only) or check the correlation values between variable x and y (the larger the value, the bigger the correlation)
+
+We can also try and use a heatmap to look at the correlation between variables and try to remove similar variables to reduce noise in our model.
+But most variables are too related and so it's fine for this prediction.
+```{r echo = FALSE}
+nba_data_no_factors = nba_data %>% select(-c(season , player))
+rquery.cormat(nba_data_no_factors)
+```
+
+However for now let's just look at the cor values
+These are related to the award_share and is a variable we find after MVP voting results (We ignore them)
+```{r echo = FALSE}
+attach(nba_data)
+cor(award_share, award_share) # 1
+cor(award_share, points_won) # 0.9794021
+cor(award_share, votes_first) # 0.8253964
+
+# These are prettying good
+cor(award_share, ws) # 0.6300161
+cor(award_share, ws_per_48) # 0.5983422
+cor(award_share, per) # 0.594713
+cor(award_share, bpm) # 0.5770941
+cor(award_share, pts_per_g) # 0.429998
+cor(award_share, fta) # 0.3576492
+cor(award_share, win_pct) # 0.3567925
+cor(award_share, usg_pct) # 0.3555547
+cor(award_share, fga) # 0.3216268
+cor(award_share, ts_pct) # 0.2441979
+cor(award_share, mp_per_g) # 0.2392686
+cor(award_share, trb_per_g) # 0.1837655
+cor(award_share, fg_pct) # 0.1496355
+cor(award_share, blk_per_g) # 0.139677
+cor(award_share, stl_per_g) # 0.1346931
+cor(award_share, ast_per_g) # 0.1279232
+cor(award_share, g) # 0.1247974
+
+# We start to get features that don't very predictive for the feature award_share, we ignore them
+cor(award_share, fg3a) # 0.117596
+cor(award_share, X) # 0.07994352
+cor(award_share, points_max) # 0.07736767 
+cor(award_share, fg3_pct) # 0.0310307
+
+```
+
+And we can try a model called a Random Forest which calculates something called a GINI value which specifies on impactful that variable is on our target
+And then builds a decision tree based on that result. We will see that see in our model building.
+
+Okay so we have a decent idea of what variables actually affect what percentage of the votes they get for MVP
+
+
+#################### Test Data ####################
+Now we can try and do some prediction
+Let's load up our Test Data (2018 - 2019)
+This is statistics on players in the 2018 - 2019 season (When spoiler alert, Canada won it's first Championship and Giannis Antekoupo of the Milwaukee Bucks won MVP)
+
+Let's take a look at it
+```{r echo = FALSE}
+nba_test_data = read.csv("~/Downloads/nba-mvp-votings-through-history/test_data.csv", header = TRUE)
+nba_test_data %>% View()
+```
+
+Now let's create a string which represents all of the features that we will be using to predict award_share
+```{r echo = FALSE}
+features = "award_share ~ ws + ws_per_48 + per + bpm + fta + win_pct + usg_pct + fga + ts_pct + mp_per_g + trb_per_g + fg_pct + blk_per_g + stl_per_g + ast_per_g + pts_per_g"
+```
+
+Note: We may or may not have choose too many features or may not the absolute best subset of features
+If we he more time to experiment, we would perform techniques such as subset selection or stepwise selection.
+We could of also use other dimensionality reduction techniques such as a Ridge or Lasso regression
+But for now we will just consider the above features
+
+Let's see if we can try if we can predict Giannis as the 2018 - 2019 MVP
+
+First let's build our models using our training data (Our training data is NBA MVP voting statistics from the 1980 season to 2017)
+
+
+#################### MODELING ####################
+Set our seed to 1 for consistent results (Some randomness involved with Random Forest and Neural Network)
+```{r echo = FALSE}
+set.seed(2019)
+```
+
+Let's use a few models
+1. Linear Regression (Plain old model, our bread and butter)
+```{r echo = FALSE}
+nba_linear_regression <- glm(as.formula(features), data = nba_data)
+```
+
+
+2. Random Forest (A forest of decision trees)
+```{r echo = FALSE}
+nba_random_forest <- randomForest(as.formula(features), data = nba_data, importance = TRUE, ntree = 100, keep.inbag = TRUE)
+nba_random_forest %>% varImpPlot()
+```
+
+3. Neural Network (A very simple feed forward neural network)
+Warning!: (May or may not be take a while to train, takes 5 minutes on my laptop)
+```{r echo = FALSE}
+nba_neural_net = neuralnet(as.formula(features), data = nba_data, hidden = 3, act.fct = "logistic", linear.output = FALSE, stepmax =1e6)
+nba_neural_net %>% plot()
+```
+
+
+#################### Prediction ####################
+Now we test and see which model performs the best and how well we do
+
+Testing with the linear regression
+```{r echo = FALSE}
+nba_linear_regression_prediction = predict(nba_linear_regression, nba_test_data)
+```
+
+
+Testing with the random forest
+```{r echo = FALSE}
+nba_random_forest_prediction = predict(nba_random_forest, nba_test_data)
+```
+
+
+Testing with the neural network
+```{r}
+nba_neural_net_prediction = compute(nba_neural_net, nba_test_data)
+```
+
+Now combine our results with the actual results into a dataframe and conclude our findings
+```{r}
+nba_test_data_results = cbind(nba_test_data, nba_linear_regression_prediction, nba_random_forest_prediction, nba_neural_net_prediction$net.result)
+nba_test_data_results %>% View()
+nba_test_data_results %>% select(player, nba_linear_regression_prediction, nba_random_forest_prediction, 'nba_neural_net_prediction$net.result') %>% View()
+```
+
+
+#################### Conclusion ####################
+Linear Regression Top 5:
+1. James Harden
+2. Giannis Antetokounmpo
+3. Nikola Jokic
+4. Kevin Durant
+5. Damian Lilliard
+
+Random Forest Top 5:
+1. Giannis Antetokounmpo	
+2. James Harden	
+3. Nikola Jokic	
+4. Rudy Gobert	
+5. Clint Capela
+
+Neural Network Top 5:
+1. Giannis Antetokounmpo	
+2. James Harden	
+3. Joel Embiid	
+4. Nikola Jokic	
+5. Paul George
+
+Actual Top 5 from 2018 - 2019 season:
+1. Giannis Antetokounmpo
+2. James Harden
+3. Paul George
+4. Nikola Jokic
+5. Stephen Curry
+
+
+
+
+
