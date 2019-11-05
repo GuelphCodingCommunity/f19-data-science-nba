@@ -23,3 +23,5 @@ randomForest
 neuralnet
 
 corrplot
+
+Data Analysis by Tony Hoan Trinh for the November 4th 2019 Guelph Coding Community Event
